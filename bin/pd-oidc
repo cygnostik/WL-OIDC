@@ -1,0 +1,258 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+use PdOidc\Access\Role;
+use PdOidc\Distribution;
+use PdOidc\Oidc\ClientRegistry;
+use PdOidc\Oidc\ProtocolStore;
+use PdOidc\Oidc\RegisteredClient;
+use PdOidc\Pilot\AccountMail;
+use PdOidc\Pilot\Accounts;
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+const USAGE = <<<'TEXT'
+    Commands
+      pd-oidc init
+      pd-oidc prune
+      pd-oidc send-account-mail
+      pd-oidc register-client CLIENT_ID "DISPLAY NAME" members|operators HTTPS_CALLBACK [HTTPS_CALLBACK ...]
+      pd-oidc create-user EMAIL NAME [read|write|admin] [--verified]
+      pd-oidc grant-identity-admin EMAIL
+      pd-oidc revoke-identity-admin EMAIL
+      pd-oidc set-enabled EMAIL on|off
+      pd-oidc set-role EMAIL read|write|admin
+      pd-oidc set-access EMAIL all|selected
+      pd-oidc set-service-enabled CLIENT_ID on|off
+      pd-oidc set-service-access EMAIL CLIENT_ID allow|deny|inherit
+      pd-oidc set-service-role EMAIL CLIENT_ID read|write|admin|inherit
+
+    create-user prompts for a hidden password on a terminal, or reads one line from stdin.
+    Use --verified only after confirming that the operator controls the email address.
+    TEXT;
+
+function readPassword(): string
+{
+    $terminal = stream_isatty(STDIN);
+    if ($terminal) {
+        exec('stty -g', $settings, $status);
+        if ($status !== 0 || count($settings) !== 1) {
+            throw new RuntimeException('Could not read terminal settings.');
+        }
+        exec('stty -echo', $output, $status);
+        if ($status !== 0) {
+            throw new RuntimeException('Could not turn off terminal echo.');
+        }
+        fwrite(STDERR, 'Password: ');
+    }
+
+    try {
+        $line = fgets(STDIN, 1027);
+    } finally {
+        if ($terminal) {
+            exec('stty ' . escapeshellarg($settings[0]));
+            fwrite(STDERR, PHP_EOL);
+        }
+    }
+    if ($line === false) {
+        throw new RuntimeException('No password was supplied.');
+    }
+    return rtrim($line, "\r\n");
+}
+
+function migrate(PDO $db): void
+{
+    $paths = glob(dirname(__DIR__) . '/database/*.sql');
+    if (!$paths) {
+        throw new RuntimeException('No database migrations were found.');
+    }
+    foreach ($paths as $path) {
+        $sql = file_get_contents($path);
+        if ($sql === false) {
+            throw new RuntimeException('Could not read ' . basename($path) . '.');
+        }
+        foreach (explode(';', $sql) as $statement) {
+            if (trim($statement) !== '') {
+                $db->exec($statement);
+            }
+        }
+    }
+}
+
+function emailAddress(string $value): string
+{
+    return Accounts::normalizeEmail($value) ?? throw new InvalidArgumentException('Enter a valid email address.');
+}
+
+function choice(string $value, array $choices): mixed
+{
+    if (!array_key_exists($value, $choices)) {
+        throw new InvalidArgumentException('Expected ' . implode(', ', array_keys($choices)) . '.');
+    }
+    return $choices[$value];
+}
+
+function roleValue(string $value): string
+{
+    return (Role::tryFrom($value) ?? throw new InvalidArgumentException('Expected read, write or admin.'))->value;
+}
+
+function findSubject(PDO $db, string $email): string
+{
+    $stmt = $db->prepare('SELECT subject FROM pd_accounts WHERE email = ?');
+    $stmt->execute([emailAddress($email)]);
+    return $stmt->fetchColumn() ?: throw new InvalidArgumentException('Account not found.');
+}
+
+function registeredClient(PDO $db, string $clientId): string
+{
+    if (!preg_match('/\A[!-~]{1,191}\z/', $clientId)) {
+        throw new InvalidArgumentException('Invalid client ID.');
+    }
+    $stmt = $db->prepare('SELECT client_id FROM pd_services WHERE client_id = ?');
+    $stmt->execute([$clientId]);
+    if ($stmt->fetchColumn() !== $clientId) {
+        throw new InvalidArgumentException('Service not found.');
+    }
+    return $clientId;
+}
+
+function createUser(PDO $db, array $args): void
+{
+    $verified = end($args) === '--verified';
+    if ($verified) {
+        array_pop($args);
+    }
+    if (count($args) < 2 || count($args) > 3) {
+        throw new InvalidArgumentException(USAGE);
+    }
+
+    [$email, $name] = $args;
+    $email = emailAddress($email);
+    $name = trim($name);
+    if (!preg_match('/\A[^\p{Cc}]{1,160}\z/u', $name)) {
+        throw new InvalidArgumentException('Enter a display name of 1 to 160 characters.');
+    }
+    $role = roleValue($args[2] ?? Role::Read->value);
+    $stmt = $db->prepare(<<<'SQL'
+        INSERT INTO pd_accounts (subject, email, display_name, password_hash, email_verified, default_role)
+        VALUES (?, ?, ?, ?, ?, ?)
+        SQL);
+    $stmt->execute([bin2hex(random_bytes(16)), $email, $name, Accounts::hashNewPassword(readPassword()), (int) $verified, $role]);
+}
+
+function setOverride(PDO $db, string $subject, string $clientId, string $column, int|string|null $value): void
+{
+    // The command switch supplies the column name as a literal.
+    $stmt = $db->prepare("INSERT INTO pd_service_overrides (subject, client_id, $column) VALUES (?, ?, ?)
+                          ON DUPLICATE KEY UPDATE $column = ?");
+    $stmt->execute([$subject, $clientId, $value, $value]);
+}
+
+function run(array $arguments): void
+{
+    $command = array_shift($arguments);
+    if (in_array($command, ['help', '--help', '-h'], true)) {
+        echo USAGE, PHP_EOL;
+        return;
+    }
+    $counts = match ($command) {
+        'init', 'prune', 'send-account-mail' => [0],
+        'grant-identity-admin', 'revoke-identity-admin' => [1],
+        'create-user' => [2, 3, 4],
+        'set-enabled', 'set-role', 'set-access', 'set-service-enabled' => [2],
+        'set-service-access', 'set-service-role' => [3],
+        default => [],
+    };
+    if ($command === 'register-client' ? count($arguments) < 4 : !in_array(count($arguments), $counts, true)) {
+        throw new InvalidArgumentException(USAGE);
+    }
+
+    $accounts = Accounts::fromEnvironment();
+    $db = $accounts->connection();
+    switch ($command) {
+        case 'init':
+            migrate($db);
+            $client = Distribution::bootstrapClient();
+            if ($client !== null) {
+                (new ClientRegistry($db))->save(new RegisteredClient($client['id'], $client['name'], $client['callbacks']),
+                    $client['operator_only'], legacyBootstrap: true);
+            }
+            break;
+        case 'register-client':
+            [$id, $name, $policy] = $arguments;
+            (new ClientRegistry($db))->save(
+                new RegisteredClient($id, $name, array_slice($arguments, 3)),
+                choice($policy, ['members' => false, 'operators' => true]),
+            );
+            break;
+        case 'prune':
+            $deleted = (new ProtocolStore($accounts))->pruneExpired();
+            printf("Pruned %d authorization codes and %d access tokens.\n", $deleted['codes'], $deleted['access_tokens']);
+            return;
+        case 'send-account-mail':
+            $sent = (new AccountMail($db))->drain();
+            if ($sent > 0) {
+                printf("Sent %d account emails.\n", $sent);
+            }
+            return;
+        case 'grant-identity-admin':
+            $db->prepare('INSERT INTO pd_identity_admins (subject) VALUES (?) ON DUPLICATE KEY UPDATE subject = pd_identity_admins.subject')
+                ->execute([findSubject($db, $arguments[0])]);
+            break;
+        case 'revoke-identity-admin':
+            $db->prepare('DELETE FROM pd_identity_admins WHERE subject = ?')->execute([findSubject($db, $arguments[0])]);
+            break;
+        case 'create-user':
+            createUser($db, $arguments);
+            break;
+        case 'set-enabled':
+            [$email, $setting] = $arguments;
+            $enabled = choice($setting, ['on' => 1, 'off' => 0]);
+            $db->prepare(<<<'SQL'
+                UPDATE pd_accounts
+                SET session_version = session_version + (enabled = TRUE AND ? = FALSE), enabled = ?
+                WHERE subject = ?
+                SQL)->execute([$enabled, $enabled, findSubject($db, $email)]);
+            break;
+        case 'set-role':
+        case 'set-access':
+            [$email, $setting] = $arguments;
+            [$column, $value] = match ($command) {
+                'set-role' => ['default_role', roleValue($setting)],
+                'set-access' => ['allow_all_services', choice($setting, ['all' => 1, 'selected' => 0])],
+            };
+            $db->prepare("UPDATE pd_accounts SET $column = ? WHERE subject = ?")
+                ->execute([$value, findSubject($db, $email)]);
+            break;
+        case 'set-service-enabled':
+            [$clientId, $setting] = $arguments;
+            $db->prepare('UPDATE pd_services SET enabled = ? WHERE client_id = ?')
+                ->execute([choice($setting, ['on' => 1, 'off' => 0]), registeredClient($db, $clientId)]);
+            break;
+        case 'set-service-access':
+        case 'set-service-role':
+            [$email, $clientId, $setting] = $arguments;
+            [$column, $value] = $command === 'set-service-access'
+                ? ['access_override', choice($setting, ['allow' => 1, 'deny' => 0, 'inherit' => null])]
+                : ['role_override', $setting === 'inherit' ? null : roleValue($setting)];
+            setOverride($db, findSubject($db, $email), registeredClient($db, $clientId), $column, $value);
+            break;
+    }
+
+    echo 'OK', PHP_EOL;
+}
+
+try {
+    run(array_slice($argv, 1));
+} catch (PDOException $error) {
+    $message = ($error->errorInfo[1] ?? null) === 1062
+        ? 'An account with that email already exists.'
+        : 'Database operation failed (SQLSTATE ' . $error->getCode() . ').';
+    fwrite(STDERR, $message . PHP_EOL);
+    exit(1);
+} catch (RuntimeException | InvalidArgumentException $error) {
+    fwrite(STDERR, $error->getMessage() . PHP_EOL);
+    exit(1);
+}

@@ -1,0 +1,28 @@
+{
+    "name": "wl-oidc/wl-oidc",
+    "description": "Self-hosted white-label OpenID Connect provider",
+    "license": "MIT",
+    "type": "project",
+    "require": {
+        "php": "^8.4",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-pdo_mysql": "*",
+        "ext-sodium": "*",
+        "laminas/laminas-diactoros": "^3",
+        "lcobucci/jwt": "^5",
+        "league/oauth2-server": "^9.4",
+        "phpmailer/phpmailer": "^7.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "PdOidc\\": "src/"
+        }
+    },
+    "config": {
+        "platform": {
+            "php": "8.4.0"
+        },
+        "sort-packages": true
+    }
+}

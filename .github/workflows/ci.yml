@@ -1,0 +1,48 @@
+name: Core checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        database: ['mysql:8.4', 'mariadb:11.4']
+    services:
+      database:
+        image: ${{ matrix.database }}
+        env:
+          MYSQL_ROOT_PASSWORD: local-ci-password
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: oidc_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PD_DB_DSN: 'mysql:host=127.0.0.1;dbname=oidc_test;charset=utf8mb4'
+      PD_DB_USER: root
+      PD_DB_PASSWORD: local-ci-password
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, openssl, sodium, mbstring
+          coverage: none
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: composer install --no-interaction --prefer-dist
+      - run: composer validate --strict
+      - run: composer audit --locked
+      - run: php tests/service-access.php
+      - run: python3 tests/run-integration.py
