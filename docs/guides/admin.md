@@ -33,6 +33,12 @@ Disabling a user or changing their service access affects new grants and the iss
 
 The user manager protects identity administrator accounts from web disablement. A deployment operator can revoke that authority first when necessary. Approval, decline and user edits are recorded in `pd_identity_audit` for operator review.
 
+## Set how long a service login lasts
+
+In **User manager → Service login duration**, enter a duration from 1 to 365 days for a client that can renew its session. Set 0 to issue short sessions only. This controls the maximum time before a new sign-in is required. Renewals issue new 15-minute credentials and recheck the account and service grant. They keep the original absolute deadline.
+
+An increase applies to new sign-ins. A decrease disables renewal for sessions issued under the previous duration. Applications can honor a signed token already in use until it expires. A browser can discard its session cookies sooner than the issuer's deadline.
+
 ## Help with setup and recovery
 
 The user's **Forgot password?** flow sends a new link to their email. It resends setup instructions for an approved account awaiting verification. For missing mail, check that the user is eligible, the mail worker is running, the SMTP credentials are current and the message is in the recipient's inbox or spam folder. Inspect mail-worker logs for delivery failures and the queue for expired or retrying entries. Each link is single-use.

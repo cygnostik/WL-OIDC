@@ -31,7 +31,9 @@ php bin/pd-oidc register-client example-client "Example service" members https:/
 
 Use a real address you have verified for the first admin. The CLI prompts for the password. To register an operator-only client, replace `members` with `operators`. Repeat `register-client` for the same ID to update its name, complete callback list and admission requirement. Account overrides and disabled state carry forward. Disable a client with `php bin/pd-oidc set-service-enabled CLIENT_ID off`.
 
-Clients discover endpoints at `ISSUER/.well-known/openid-configuration`. Configure a public client with Authorization Code and S256 PKCE, the exact registered HTTPS callback, and scopes `openid profile email` as needed. Validate state, nonce if supplied, RS256 signature, issuer, audience and expiry. Use `(issuer, sub)` as the stable account identifier. The `pd_role` claim is scoped to the requesting client. Version 0.1 supports public clients, RSA signing, authorization code grants and UserInfo.
+Clients discover endpoints at `ISSUER/.well-known/openid-configuration`. Configure a public client with Authorization Code and S256 PKCE, the exact registered HTTPS callback, and scopes `openid profile email` as needed. Validate state, nonce if supplied, RS256 signature, issuer, audience and expiry. Use `(issuer, sub)` as the stable account identifier. The `pd_role` claim is scoped to the requesting client.
+
+Clients supporting renewal may use `grant_type=refresh_token` when an identity administrator enables a longer [service login duration](admin.md#set-how-long-a-service-login-lasts). Replace the stored refresh token after each exchange and coalesce concurrent requests for the same session. Reusing a rotated token revokes the renewal session. Send the most recent refresh token to the advertised revocation endpoint on logout. Keep tokens in secure storage and verify each new ID token. Public clients may supply `client_id` on refresh, which must match the original grant.
 
 ## Run the issuer
 
@@ -46,7 +48,7 @@ docker run --rm --env-file /private/issuer.env \
 
 Set `PD_OIDC_PRIVATE_KEY_FILE=/run/secrets/signing.pem` in that environment. Provide a database DSN reachable from the container. Initialize the database with the same image and environment before exposing the issuer. Configure the proxy to redirect HTTP to HTTPS, preserve method, query and body, and reach the private listener. Check the public sign-in, discovery, JWKS and callback before handing the issuer to a client.
 
-Run `php bin/pd-oidc send-account-mail` regularly as a worker with both runtime configuration and SMTP settings. It sends due messages and backs off on failure. Run `php bin/pd-oidc prune` regularly to clear expired OIDC grants. Keep SMTP credentials in the mail worker environment. Rotate and review logs without recording credentials or account-link codes.
+Run `php bin/pd-oidc send-account-mail` regularly as a worker with both runtime configuration and SMTP settings. It sends due messages and backs off on failure. Run `php bin/pd-oidc prune` regularly to clear expired OIDC grants and refresh sessions. Keep SMTP credentials in the mail worker environment. Rotate and review logs without recording credentials or account-link codes.
 
 ## Update, back up and recover
 

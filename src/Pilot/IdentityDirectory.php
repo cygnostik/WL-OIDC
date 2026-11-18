@@ -6,6 +6,7 @@ namespace PdOidc\Pilot;
 use DomainException;
 use PDO;
 use PdOidc\Access\Role;
+use PdOidc\Oidc\RefreshSessions;
 use RuntimeException;
 use Throwable;
 
@@ -146,10 +147,23 @@ final class IdentityDirectory
         });
     }
 
+    public function setLoginDays(Account $actor, string $clientId, int $days): void
+    {
+        if ($days < 0 || $days > RefreshSessions::MAX_DAYS) {
+            throw new DomainException('Use a session duration from 0 to ' . RefreshSessions::MAX_DAYS . ' days.');
+        }
+        $this->change($actor, function () use ($actor, $clientId, $days): void {
+            $this->requireService($clientId);
+            (new RefreshSessions($this->db))->setDays($clientId, $days);
+            $this->audit($actor, 'service.login_days', $clientId);
+        });
+    }
+
     private function services(): array
     {
-        return $this->db->query('SELECT client_id, display_name, enabled, requires_operator'
-            . ' FROM pd_services JOIN pd_oidc_clients USING (client_id) ORDER BY display_name, client_id')->fetchAll();
+        return $this->db->query('SELECT client_id, display_name, enabled, requires_operator, COALESCE(p.days, 0) AS login_days'
+            . ' FROM pd_services JOIN pd_oidc_clients USING (client_id)'
+            . ' LEFT JOIN pd_oidc_login_policies p USING (client_id) ORDER BY display_name, client_id')->fetchAll();
     }
 
     private function requireService(string $clientId, bool $enabledOnly = false): void

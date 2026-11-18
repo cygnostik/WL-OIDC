@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace PdOidc\Oidc;
 
+use DateTimeImmutable;
 use League\OAuth2\Server\Entities\AccessTokenEntityInterface;
 use League\OAuth2\Server\Entities\AuthCodeEntityInterface;
 use League\OAuth2\Server\Entities\ClientEntityInterface;
@@ -20,6 +21,7 @@ use League\OAuth2\Server\Repositories\RefreshTokenRepositoryInterface;
 use League\OAuth2\Server\Repositories\ScopeRepositoryInterface;
 use LogicException;
 use PDO;
+use PdOidc\Access\Role;
 use PdOidc\Pilot\Account;
 use PdOidc\Pilot\Accounts;
 
@@ -36,6 +38,7 @@ final class ProtocolStore implements
 {
     private readonly PDO $pdo;
     private readonly ClientRegistry $clients;
+    private readonly RefreshSessions $refresh;
     private ?array $authentication = null;
     private ?array $redeeming = null;
 
@@ -43,6 +46,7 @@ final class ProtocolStore implements
     {
         $this->pdo = $accounts->connection();
         $this->clients = new ClientRegistry($this->pdo);
+        $this->refresh = new RefreshSessions($this->pdo);
     }
 
     public function setAuthenticationContext(?string $nonce, int $authTime, int $sessionVersion): void
@@ -146,7 +150,7 @@ final class ProtocolStore implements
         ClientEntityInterface $clientEntity,
         array $scopes,
         ?string $userIdentifier = null,
-    ): AccessTokenEntityInterface {
+    ): AccessToken {
         $token = new AccessToken();
         $token->setClient($clientEntity);
         if ($userIdentifier !== null) {
@@ -186,32 +190,91 @@ final class ProtocolStore implements
             static fn(ScopeEntityInterface $scope): string => $scope->getIdentifier(),
             $accessTokenEntity->getScopes(),
         );
+        $authTime = (int) $this->redeeming['auth_time'];
+        $this->persistAccess($accessTokenEntity, $account, $role, $sessionVersion, $authTime, $scopes, $this->redeeming['nonce']);
+        $accessTokenEntity->setRefreshToken($this->refresh->start(
+            $accessTokenEntity->getClient()->getIdentifier(), $account->subject, $sessionVersion, $authTime, $scopes,
+        ));
+    }
+
+    public function renew(
+        #[\SensitiveParameter] string $refreshToken,
+        ?string $clientId,
+        ?string $scope,
+        int $accessLifetime,
+    ): ?AccessToken {
+        $session = $this->refresh->find($refreshToken, $clientId);
+        if ($session === null || !$this->refresh->canRenew($session)) {
+            return null;
+        }
+        $client = $this->getClientEntity($session['client_id']);
+        $subject = $session['subject'];
+        $version = (int) $session['session_version'];
+        $role = $client === null ? null : $this->accounts->effectiveRole($subject, $session['client_id'],
+            lock: true, sessionVersion: $version);
+        $account = $role === null ? null : $this->accounts->findBySubject($subject);
+        if ($account === null) {
+            $this->refresh->revoke($session['id']);
+            return null;
+        }
+
+        $original = explode(' ', $session['scopes']);
+        $scopes = $scope === null ? $original : array_unique(explode(' ', $scope));
+        if (!in_array('openid', $scopes, true) || array_diff($scopes, $original) !== []) {
+            throw OAuthServerException::invalidScope('scope');
+        }
+        $entities = array_map(fn(string $name): ScopeEntityInterface => $this->getScopeEntityByIdentifier($name), $scopes);
+        $token = $this->getNewToken($client, $entities, $subject);
+        $token->setIdentifier(bin2hex(random_bytes(40)));
+        $token->setExpiryDateTime((new DateTimeImmutable())->setTimestamp(min(time() + $accessLifetime, (int) $session['expires_at'])));
+        $this->persistAccess($token, $account, $role, $version, (int) $session['auth_time'], $scopes);
+        $token->setRefreshToken($this->refresh->rotate($session));
+        return $token;
+    }
+
+    public function revokeRefreshSession(#[\SensitiveParameter] string $token, ?string $clientId): void
+    {
+        $session = $this->refresh->find($token, $clientId);
+        if ($session !== null) {
+            $this->refresh->revoke($session['id']);
+        }
+    }
+
+    private function persistAccess(
+        AccessToken $accessToken,
+        Account $account,
+        Role $role,
+        int $sessionVersion,
+        int $authTime,
+        array $scopes,
+        ?string $nonce = null,
+    ): void {
         $profile = in_array('profile', $scopes, true);
         $email = in_array('email', $scopes, true);
         $claims = self::identityClaims($account, $profile, $email) + [
             'pd_role' => $role->value,
-            'auth_time' => (int) $this->redeeming['auth_time'],
+            'auth_time' => $authTime,
         ];
-        if ($this->redeeming['nonce'] !== null) {
-            $claims['nonce'] = $this->redeeming['nonce'];
+        if ($nonce !== null) {
+            $claims['nonce'] = $nonce;
         }
-        $accessTokenEntity->setIdClaims($claims);
+        $accessToken->setIdClaims($claims);
 
         $statement = $this->pdo->prepare(
             'INSERT INTO pd_oidc_access_tokens (token_hash, subject, session_version, profile_scope, email_scope, expires_at)'
                 . ' VALUES (?, ?, ?, ?, ?, ?)',
         );
-        $tokenHash = hash('sha256', $accessTokenEntity->getIdentifier());
+        $tokenHash = hash('sha256', $accessToken->getIdentifier());
         $statement->execute([
             $tokenHash,
-            $subject,
+            $account->subject,
             $sessionVersion,
             (int) $profile,
             (int) $email,
-            $accessTokenEntity->getExpiryDateTime()->getTimestamp(),
+            $accessToken->getExpiryDateTime()->getTimestamp(),
         ]);
         $this->pdo->prepare('INSERT INTO pd_oidc_access_token_clients (token_hash, client_id) VALUES (?, ?)')
-            ->execute([$tokenHash, $accessTokenEntity->getClient()->getIdentifier()]);
+            ->execute([$tokenHash, $accessToken->getClient()->getIdentifier()]);
     }
 
     public function revokeAccessToken(string $tokenId): void

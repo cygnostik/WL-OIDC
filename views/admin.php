@@ -45,6 +45,23 @@
         <?php if (count($data['requests']) > 30): ?><a href="<?= $escape($pageUrl($data['page'], $data['requestPage'] + 1)) ?>">Next requests</a><?php endif; ?>
     </nav>
 </section>
+<?php if ($data['services'] !== []): ?>
+    <section>
+        <h2>Service login duration</h2>
+        <p>Set the longest a supported service can keep a login active. Enter 0 for a 15-minute session.</p>
+        <?php foreach ($data['services'] as $service): ?>
+            <form class="search" action="/admin" method="post">
+                <input type="hidden" name="csrf" value="<?= $escape($csrf) ?>">
+                <input type="hidden" name="action" value="set_login_days">
+                <input type="hidden" name="service" value="<?= $escape($service['client_id']) ?>">
+                <label><?= $escape($service['display_name']) ?> (days)
+                    <input type="number" name="login_days" min="0" max="<?= \PdOidc\Oidc\RefreshSessions::MAX_DAYS ?>" value="<?= (int) $service['login_days'] ?>" required>
+                </label>
+                <button type="submit" class="secondary">Save duration</button>
+            </form>
+        <?php endforeach; ?>
+    </section>
+<?php endif; ?>
 <section>
     <h2>Users</h2>
     <form method="get" action="/admin" class="search">

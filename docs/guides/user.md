@@ -15,6 +15,8 @@ Start from the project you want to use. It sends you to the issuer to sign in, t
 
 Use **Sign out** on the issuer to end its sign-in session. Use the project's own sign-out control to end your session there. If a project denies access, ask your identity administrator to check your account, service grant and role.
 
+Some projects renew your session in the background. Your identity administrator sets the maximum duration. Your browser may clear site cookies sooner, and account or service access changes can end renewal.
+
 ## Change or recover a password
 
 Open **Forgot password?** and enter the email tied to your account. If the account is eligible, you will receive a single-use link valid for 45 minutes. Use the link to choose and confirm your new password, then sign in again. The change closes your existing issuer sessions and invalidates outstanding recovery links.

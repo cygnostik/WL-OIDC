@@ -9,6 +9,7 @@ const changePolicy = process.env.PD_TEST_POLICY_CHANGES === '1';
 const clientId = process.env.PD_TEST_CLIENT_ID || 'example-client';
 const callback = process.env.PD_TEST_CALLBACK || 'https://app.example.test/auth/callback';
 const expectedRole = process.env.PD_TEST_EXPECTED_ROLE || 'admin';
+const longSession = process.env.PD_TEST_REFRESH === '1';
 const registeredCallback = new URL(callback);
 assert(email && password, 'Set PD_TEST_EMAIL and PD_TEST_PASSWORD for a fixture operator.');
 if (changePolicy) {
@@ -117,7 +118,8 @@ const responses = await Promise.all([tokenRequest(code, login.verifier), tokenRe
 assert.deepEqual(responses.map(response => response.status).sort(), [200, 400]);
 const tokens = await responses.find(response => response.ok).json();
 assert.equal(tokens.token_type, 'Bearer');
-assert.equal(tokens.refresh_token, undefined);
+if (longSession) assert.match(tokens.refresh_token, /^[a-f0-9]{64}$/);
+else assert.equal(tokens.refresh_token, undefined);
 const [header, payload, signature] = tokens.id_token.split('.');
 const tokenHeader = JSON.parse(Buffer.from(header, 'base64url'));
 const claims = JSON.parse(Buffer.from(payload, 'base64url'));
@@ -140,6 +142,54 @@ if (metadata.userinfo_endpoint) {
     const userinfo = await fetch(metadata.userinfo_endpoint, { headers: { authorization: 'Bearer ' + tokens.access_token } });
     assert.equal(userinfo.status, 200);
     assert.equal((await userinfo.json()).sub, claims.sub);
+}
+
+if (longSession) {
+    const send = (endpoint, values) => fetch(endpoint, { method: 'POST', body: new URLSearchParams(values) });
+    const refresh = (token, extra = {}) => send(metadata.token_endpoint, {
+        grant_type: 'refresh_token', refresh_token: token, scope: 'openid profile email', ...extra,
+    });
+    assert.equal((await refresh(tokens.refresh_token, { client_id: 'another-client' })).status, 400);
+    const renewed = await refresh(tokens.refresh_token);
+    assert.equal(renewed.status, 200);
+    const next = await renewed.json();
+    assert.match(next.refresh_token, /^[a-f0-9]{64}$/);
+    assert.notEqual(next.refresh_token, tokens.refresh_token);
+    const [h, c, s] = next.id_token.split('.');
+    const nextClaims = JSON.parse(Buffer.from(c, 'base64url'));
+    assert(verify('RSA-SHA256', Buffer.from(h + '.' + c), createPublicKey({ key: jwk, format: 'jwk' }), Buffer.from(s, 'base64url')));
+    assert.equal(nextClaims.iss, issuer);
+    assert.equal(nextClaims.sub, claims.sub);
+    assert.deepEqual([nextClaims.aud].flat(), [clientId]);
+    assert.equal(nextClaims.pd_role, expectedRole);
+    assert.equal(nextClaims.auth_time, claims.auth_time);
+    assert(nextClaims.exp - nextClaims.iat <= 900);
+    assert.equal((await refresh(tokens.refresh_token)).status, 400);
+    assert.equal((await refresh(next.refresh_token)).status, 400, 'Replay must revoke the whole refresh session.');
+
+    const pending = authorization();
+    const pendingCode = callbackParameters(await visit(pending.url), pending.state).get('code');
+    const session = await (await tokenRequest(pendingCode, pending.verifier)).json();
+    assert.match(session.refresh_token, /^[a-f0-9]{64}$/);
+    assert.equal((await send(metadata.revocation_endpoint, {
+        token: session.refresh_token, token_type_hint: 'refresh_token', client_id: clientId,
+    })).status, 200);
+    assert.equal((await refresh(session.refresh_token)).status, 400);
+    if (process.env.PD_TEST_REFRESH_POLICY_CHANGES === '1') {
+        assert(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(issuer).hostname));
+        const allowed = authorization();
+        const allowedCode = callbackParameters(await visit(allowed.url), allowed.state).get('code');
+        const disabled = await (await tokenRequest(allowedCode, allowed.verifier)).json();
+        assert.match(disabled.refresh_token, /^[a-f0-9]{64}$/);
+        try {
+            execFileSync('php', ['bin/pd-oidc', 'set-enabled', email, 'off'], { stdio: 'ignore' });
+            assert.equal((await refresh(disabled.refresh_token)).status, 400);
+        } finally {
+            execFileSync('php', ['bin/pd-oidc', 'set-enabled', email, 'on'], { stdio: 'ignore' });
+        }
+        assert.equal((await refresh(disabled.refresh_token)).status, 400);
+    }
+    console.log('Long login passed compatible rotation, replay invalidation and logout revocation.');
 }
 
 if (changePolicy) {

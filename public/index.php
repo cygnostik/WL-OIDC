@@ -25,7 +25,7 @@ try {
     $methods = match ($path) {
         '/', '/account', '/oauth2/authorize', '/.well-known/openid-configuration',
         '/.well-known/openid-configuration/', '/oidc/jwks' => ['GET'],
-        '/login', '/logout', '/oauth2/token' => ['POST'],
+        '/login', '/logout', '/oauth2/token', '/oauth2/revoke' => ['POST'],
         '/oidc/userinfo', '/create-account', '/password/forgot', '/password/reset', '/admin', '/admin/user' => ['GET', 'POST'],
         default => [],
     };
@@ -40,6 +40,7 @@ try {
                 new JsonResponse(Provider::fromEnvironment($accounts)->discovery()),
             '/oidc/jwks' => new JsonResponse(Provider::fromEnvironment($accounts)->jwks()),
             '/oauth2/token' => Provider::fromEnvironment($accounts)->token($request),
+            '/oauth2/revoke' => Provider::fromEnvironment($accounts)->revoke($request),
             '/oidc/userinfo' => Provider::fromEnvironment($accounts)->userinfo($request),
             default => (new BrowserSignIn($accounts))->handle($path, $request),
         };

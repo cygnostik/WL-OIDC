@@ -137,6 +137,14 @@ final class AccountPages
     {
         if ($form !== null) {
             try {
+                if (self::field($form, 'action') === 'set_login_days') {
+                    $days = self::field($form, 'login_days');
+                    if (!preg_match('/\A(?:0|[1-9][0-9]{0,2})\z/', $days)) {
+                        throw new DomainException('Enter the number of login days as a whole number.');
+                    }
+                    $this->directory->setLoginDays($actor, self::field($form, 'service'), (int) $days);
+                    return self::notice('/admin', 'Service login duration saved.');
+                }
                 $decision = self::field($form, 'decision');
                 if (!in_array($decision, ['approve', 'decline'], true)) {
                     throw new DomainException('Choose Approve or Decline.');

@@ -15,6 +15,7 @@ final class AccessToken implements AccessTokenEntityInterface
     use TokenEntityTrait;
 
     private ?array $idClaims = null;
+    private ?string $refreshToken = null;
 
     public function setPrivateKey(#[\SensitiveParameter] CryptKeyInterface $privateKey): void
     {
@@ -34,5 +35,15 @@ final class AccessToken implements AccessTokenEntityInterface
     public function idClaims(): array
     {
         return $this->idClaims ?? throw new LogicException('ID token claims were not resolved');
+    }
+
+    public function setRefreshToken(#[\SensitiveParameter] ?string $token): void
+    {
+        $this->refreshToken = $token;
+    }
+
+    public function refreshToken(): ?string
+    {
+        return $this->refreshToken;
     }
 }

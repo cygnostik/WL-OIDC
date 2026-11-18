@@ -11,6 +11,7 @@ const readCode = process.env.PD_TEST_READ_CODE;
 const client = process.env.PD_TEST_CLIENT_ID || 'example-client';
 const callback = process.env.PD_TEST_CALLBACK || 'https://app.example.test/auth/callback';
 const serviceName = process.env.PD_TEST_SERVICE_NAME || 'Example service';
+const longClient = process.env.PD_TEST_LONG_CLIENT;
 const run = promisify(execFile);
 assert(adminEmail && adminPassword && applicant && readCode, 'Use a disposable admin, applicant and fixture code reader.');
 
@@ -99,6 +100,7 @@ const member = browser();
 assert.equal((await signIn(member, applicant, originalPassword)).location, '/account');
 assert.equal((await member('/admin')).status, 403);
 assert.equal((await member('/admin', decision)).status, 403);
+assert.equal((await member('/admin', { action: 'set_login_days', service: client, login_days: '90' })).status, 403);
 assert.equal((await member('/admin/user?subject=00000000000000000000000000000000')).status, 403);
 const reusedActivation = browser();
 await openLink(reusedActivation, activation);
@@ -141,4 +143,11 @@ const disabled = await admin('/admin/user?subject=' + subject);
 assert.match(disabled.html, /value="disabled" selected/);
 assert.match(disabled.html, /value="deny" selected/);
 assert.equal((await signIn(browser(), applicant, newPassword)).status, 401);
+if (longClient) {
+    const duration = { action: 'set_login_days', service: longClient, login_days: '90' };
+    assert.equal((await post(admin, '/admin', duration)).location, '/admin');
+    const settings = await admin('/admin');
+    assert.match(settings.html, /Service login duration saved/);
+    assert.match(settings.html, /name="login_days" min="0" max="365" value="90"/);
+}
 console.log('Signup, identity admin approval, mailbox setup and recovery, concurrent single use, session invalidation and user policy passed.');

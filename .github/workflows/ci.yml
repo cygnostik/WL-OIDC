@@ -10,7 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        database: ['mysql:8.4', 'mariadb:11.4']
+        include:
+          - database: 'mysql:8.4'
+            health: 'mysqladmin ping --silent'
+          - database: 'mariadb:11.4'
+            health: 'healthcheck.sh --connect --innodb_initialized'
     services:
       database:
         image: ${{ matrix.database }}
@@ -21,7 +25,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd "mysqladmin ping --silent"
+          --health-cmd "${{ matrix.health }}"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 12

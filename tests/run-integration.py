@@ -66,6 +66,7 @@ def main():
             PD_TEST_ADMIN_PASSWORD=password,
             PD_TEST_APPLICANT="applicant@example.test",
             PD_TEST_READ_CODE=str(reader),
+            PD_TEST_LONG_CLIENT="example-members",
             PHP_CLI_SERVER_WORKERS="4",
         )
 
@@ -105,6 +106,8 @@ def main():
                     env, PD_TEST_EMAIL="member@example.test", PD_TEST_PASSWORD=password,
                     PD_TEST_CLIENT_ID="example-members", PD_TEST_CALLBACK="https://members.example.test/auth/callback?source=account",
                     PD_TEST_EXPECTED_ROLE="read", PD_TEST_POLICY_CHANGES="0",
+                    PD_TEST_REFRESH="1",
+                    PD_TEST_REFRESH_POLICY_CHANGES="1",
                 ), check=True)
             except Exception:
                 log.seek(0)

@@ -22,12 +22,16 @@ final class IdTokenResponse extends BearerTokenResponse
         $claims = $accessToken->idClaims();
         unset($claims['sub']);
         $claims['at_hash'] = SigningKey::base64Url(substr(hash('sha256', $accessToken->toString(), true), 0, 16));
-        return ['id_token' => $this->signingKey->signIdToken(
+        $parameters = ['id_token' => $this->signingKey->signIdToken(
             $this->issuer,
             $accessToken->getClient()->getIdentifier(),
             $subject,
             $accessToken->getExpiryDateTime(),
             $claims,
         )];
+        if ($accessToken->refreshToken() !== null) {
+            $parameters['refresh_token'] = $accessToken->refreshToken();
+        }
+        return $parameters;
     }
 }

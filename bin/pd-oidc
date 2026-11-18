@@ -6,6 +6,7 @@ use PdOidc\Access\Role;
 use PdOidc\Distribution;
 use PdOidc\Oidc\ClientRegistry;
 use PdOidc\Oidc\ProtocolStore;
+use PdOidc\Oidc\RefreshSessions;
 use PdOidc\Oidc\RegisteredClient;
 use PdOidc\Pilot\AccountMail;
 use PdOidc\Pilot\Accounts;
@@ -178,6 +179,9 @@ function run(array $arguments): void
             if ($client !== null) {
                 (new ClientRegistry($db))->save(new RegisteredClient($client['id'], $client['name'], $client['callbacks']),
                     $client['operator_only'], legacyBootstrap: true);
+                if (isset($client['login_days'])) {
+                    (new RefreshSessions($db))->setDays($client['id'], $client['login_days'], bootstrap: true);
+                }
             }
             break;
         case 'register-client':
@@ -189,7 +193,8 @@ function run(array $arguments): void
             break;
         case 'prune':
             $deleted = (new ProtocolStore($accounts))->pruneExpired();
-            printf("Pruned %d authorization codes and %d access tokens.\n", $deleted['codes'], $deleted['access_tokens']);
+            printf("Pruned %d authorization codes, %d access tokens and %d refresh sessions.\n",
+                $deleted['codes'], $deleted['access_tokens'], (new RefreshSessions($db))->prune());
             return;
         case 'send-account-mail':
             $sent = (new AccountMail($db))->drain();

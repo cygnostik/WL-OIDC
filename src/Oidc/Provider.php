@@ -25,7 +25,7 @@ use Throwable;
 final class Provider
 {
     private const AUTHORIZATION_LIFETIME = 'PT2M';
-    private const TOKEN_LIFETIME = 'PT15M';
+    private const TOKEN_LIFETIME = 900;
     private const MAX_FORM_BYTES = 16_384;
 
     private readonly SigningKey $signingKey;
@@ -50,7 +50,7 @@ final class Provider
         );
         $this->server->enableGrantType(
             new AuthCodeGrant($this->store, $this->store, new DateInterval(self::AUTHORIZATION_LIFETIME)),
-            new DateInterval(self::TOKEN_LIFETIME),
+            new DateInterval('PT' . self::TOKEN_LIFETIME . 'S'),
         );
     }
 
@@ -80,15 +80,17 @@ final class Provider
             'issuer' => $this->issuer,
             'authorization_endpoint' => $this->issuer . '/oauth2/authorize',
             'token_endpoint' => $this->issuer . '/oauth2/token',
+            'revocation_endpoint' => $this->issuer . '/oauth2/revoke',
             'userinfo_endpoint' => $this->issuer . '/oidc/userinfo',
             'jwks_uri' => $this->issuer . '/oidc/jwks',
             'scopes_supported' => RegisteredClient::SCOPES,
             'response_types_supported' => ['code'],
             'response_modes_supported' => ['query'],
-            'grant_types_supported' => ['authorization_code'],
+            'grant_types_supported' => ['authorization_code', 'refresh_token'],
             'subject_types_supported' => ['public'],
             'id_token_signing_alg_values_supported' => ['RS256'],
             'token_endpoint_auth_methods_supported' => ['none'],
+            'revocation_endpoint_auth_methods_supported' => ['none'],
             'code_challenge_methods_supported' => ['S256'],
             'claims_supported' => [
                 'iss', 'sub', 'aud', 'exp', 'iat', 'auth_time', 'nonce', 'at_hash',
@@ -229,22 +231,15 @@ final class Provider
         }
 
         try {
-            $contentType = strtolower(trim(explode(';', $request->getHeaderLine('Content-Type'), 2)[0]));
-            $form = $request->getParsedBody();
-            if ($contentType !== 'application/x-www-form-urlencoded' || !is_array($form)) {
-                throw OAuthServerException::invalidRequest('request');
+            $form = self::publicClientForm($request);
+            if (($form['grant_type'] ?? null) === 'refresh_token') {
+                return $this->renew($form);
             }
-            $body = $request->getBody();
-            if ($body->isSeekable()) {
-                $body->rewind();
-            }
-            self::validateParameters($body->read(self::MAX_FORM_BYTES + 1), $form);
             if (($form['grant_type'] ?? null) !== 'authorization_code') {
                 throw OAuthServerException::unsupportedGrantType();
             }
             $client = $this->store->getClientEntity($form['client_id'] ?? '');
-            if ($client === null || $request->hasHeader('Authorization')
-                || isset($form['client_secret']) || isset($form['client_assertion']) || isset($form['client_assertion_type'])) {
+            if ($client === null) {
                 throw OAuthServerException::invalidClient($request);
             }
             if (!$client->acceptsCallback($form['redirect_uri'] ?? null)) {
@@ -261,6 +256,55 @@ final class Provider
                 ->withHeader('Cache-Control', 'no-store')
                 ->withHeader('Pragma', 'no-cache');
         }
+    }
+
+    public function revoke(ServerRequestInterface $request): ResponseInterface
+    {
+        $form = self::publicClientForm($request);
+        if (!is_string($form['token'] ?? null) || $form['token'] === '') {
+            throw OAuthServerException::invalidRequest('token');
+        }
+        return $this->transaction(function () use ($form): ResponseInterface {
+            $this->store->revokeRefreshSession($form['token'], $form['client_id'] ?? null);
+            return new Response();
+        });
+    }
+
+    private function renew(#[SensitiveParameter] array $form): ResponseInterface
+    {
+        if (!isset($form['refresh_token']) || $form['refresh_token'] === '') {
+            throw OAuthServerException::invalidRequest('refresh_token');
+        }
+        return $this->transaction(function () use ($form): ResponseInterface {
+            // The opaque grant supplies the client binding for public clients omitting client_id.
+            $token = $this->store->renew($form['refresh_token'], $form['client_id'] ?? null,
+                $form['scope'] ?? null, self::TOKEN_LIFETIME);
+            if ($token === null) {
+                return self::jsonError('invalid_grant', 400, ['Pragma' => 'no-cache']);
+            }
+            $response = new IdTokenResponse($this->issuer, $this->signingKey);
+            $response->setAccessToken($token);
+            return $response->generateHttpResponse(new Response());
+        });
+    }
+
+    private static function publicClientForm(ServerRequestInterface $request): array
+    {
+        $contentType = strtolower(trim(explode(';', $request->getHeaderLine('Content-Type'), 2)[0]));
+        $form = $request->getParsedBody();
+        if ($contentType !== 'application/x-www-form-urlencoded' || !is_array($form)) {
+            throw OAuthServerException::invalidRequest('request');
+        }
+        $body = $request->getBody();
+        if ($body->isSeekable()) {
+            $body->rewind();
+        }
+        self::validateParameters($body->read(self::MAX_FORM_BYTES + 1), $form);
+        if ($request->hasHeader('Authorization') || isset($form['client_secret'])
+            || isset($form['client_assertion']) || isset($form['client_assertion_type'])) {
+            throw OAuthServerException::invalidClient($request);
+        }
+        return $form;
     }
 
     public function userinfo(ServerRequestInterface $request): ResponseInterface
